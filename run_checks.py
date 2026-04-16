@@ -36,7 +36,7 @@ def parse_args() -> argparse.Namespace:
 def run_once() -> int:
     started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{started_at}] Starting automated product check...")
-    result = server.refresh_all_products()
+    result = server.refresh_all_products(all_scopes=True)
 
     updated = len(result["updated"])
     drops = len(result["drops"])

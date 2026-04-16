@@ -30,7 +30,11 @@ SUPPORTED_STORES = {
 
 
 def fetch_product_snapshot(target: str) -> ProductSnapshot:
-    parsed = urllib.parse.urlparse(target.strip())
+    target = target.strip()
+    if target.isdigit():
+        return fetch_woolworths_product_snapshot(target)
+
+    parsed = urllib.parse.urlparse(target)
     host = parsed.netloc.lower()
 
     if "woolworths.com.au" in host:

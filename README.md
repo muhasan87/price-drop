@@ -35,7 +35,39 @@ cp .env.example .env
 python3 server.py
 ```
 
-Open `http://127.0.0.1:8080`.
+The Python server is now the backend API only.
+
+## Run the Next.js frontend
+
+The Python backend still handles scraping, auth, and PostgreSQL APIs. The new React frontend runs separately and talks to that backend.
+
+Install frontend dependencies:
+
+```bash
+npm install
+```
+
+Start the Python backend:
+
+```bash
+python3 server.py
+```
+
+Then start Next.js:
+
+```bash
+npm run dev
+```
+
+Open `http://127.0.0.1:3000`.
+
+If your backend is running somewhere else, set:
+
+```bash
+NEXT_PUBLIC_API_BASE=http://127.0.0.1:8080
+```
+
+The Next app now includes a web manifest and installable app metadata, which gives you a cleaner path toward Android and iOS home-screen installs before wrapping it in a native shell later.
 
 Use the pages like this:
 

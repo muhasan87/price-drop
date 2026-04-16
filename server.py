@@ -43,6 +43,14 @@ APP_HOST = os.getenv("APP_HOST", "127.0.0.1")
 APP_PORT = int(os.getenv("APP_PORT", "8080"))
 SESSION_COOKIE_NAME = "pricewatch_session"
 SESSION_TTL_SECONDS = 60 * 60 * 24 * 30
+FRONTEND_ORIGINS = {
+    origin.strip()
+    for origin in os.getenv(
+        "FRONTEND_ORIGINS",
+        "http://127.0.0.1:3000,http://localhost:3000,http://127.0.0.1:8080,http://localhost:8080",
+    ).split(",")
+    if origin.strip()
+}
 
 
 def utc_now():
@@ -86,53 +94,64 @@ def init_db():
             """)
 
             cur.execute("""
-                CREATE TABLE IF NOT EXISTS watched_products (
+                CREATE TABLE IF NOT EXISTS products (
                     id SERIAL PRIMARY KEY,
-                    product_id TEXT NOT NULL,
+                    external_product_id TEXT NOT NULL UNIQUE,
                     product_url TEXT NOT NULL,
                     name TEXT,
                     brand TEXT,
                     current_price DOUBLE PRECISION,
-                    previous_price DOUBLE PRECISION,
+                    original_price DOUBLE PRECISION,
                     was_price DOUBLE PRECISION,
                     cup_price TEXT,
                     in_stock BOOLEAN,
                     image_url TEXT,
                     last_checked_at TIMESTAMPTZ,
-                    has_drop BOOLEAN DEFAULT FALSE,
+                    created_at TIMESTAMPTZ NOT NULL,
+                    updated_at TIMESTAMPTZ NOT NULL
+                );
+            """)
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS user_watchlists (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                    product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+                    active BOOLEAN NOT NULL DEFAULT TRUE,
+                    last_seen_price DOUBLE PRECISION,
+                    last_notified_price DOUBLE PRECISION,
+                    notify_on_drop BOOLEAN NOT NULL DEFAULT TRUE,
+                    notify_on_increase BOOLEAN NOT NULL DEFAULT FALSE,
                     created_at TIMESTAMPTZ NOT NULL
                 );
             """)
 
             cur.execute("""
-                CREATE TABLE IF NOT EXISTS price_history (
+                CREATE TABLE IF NOT EXISTS product_price_history (
                     id SERIAL PRIMARY KEY,
-                    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-                    product_id TEXT NOT NULL,
+                    product_id INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
                     price DOUBLE PRECISION,
+                    was_price DOUBLE PRECISION,
+                    in_stock BOOLEAN,
                     recorded_at TIMESTAMPTZ NOT NULL
                 );
             """)
 
             cur.execute("""
-                ALTER TABLE watched_products
-                ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id) ON DELETE CASCADE
-            """)
-
-            cur.execute("""
-                ALTER TABLE price_history
-                ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id) ON DELETE CASCADE
-            """)
-
-            cur.execute("""
                 DO $$
                 BEGIN
                     IF EXISTS (
                         SELECT 1
-                        FROM pg_constraint
-                        WHERE conname = 'price_history_product_id_fkey'
+                        FROM information_schema.tables
+                        WHERE table_schema = 'public'
+                          AND table_name = 'watched_products'
+                    ) AND NOT EXISTS (
+                        SELECT 1
+                        FROM information_schema.tables
+                        WHERE table_schema = 'public'
+                          AND table_name = 'watched_products_legacy'
                     ) THEN
-                        ALTER TABLE price_history DROP CONSTRAINT price_history_product_id_fkey;
+                        ALTER TABLE watched_products RENAME TO watched_products_legacy;
                     END IF;
                 END
                 $$;
@@ -143,28 +162,204 @@ def init_db():
                 BEGIN
                     IF EXISTS (
                         SELECT 1
-                        FROM pg_constraint
-                        WHERE conname = 'watched_products_product_id_key'
+                        FROM information_schema.tables
+                        WHERE table_schema = 'public'
+                          AND table_name = 'price_history'
+                    ) AND NOT EXISTS (
+                        SELECT 1
+                        FROM information_schema.tables
+                        WHERE table_schema = 'public'
+                          AND table_name = 'price_history_legacy'
                     ) THEN
-                        ALTER TABLE watched_products DROP CONSTRAINT watched_products_product_id_key;
+                        ALTER TABLE price_history RENAME TO price_history_legacy;
                     END IF;
                 END
                 $$;
             """)
 
             cur.execute("""
-                ALTER TABLE price_history
-                ALTER COLUMN product_id SET NOT NULL
+                CREATE INDEX IF NOT EXISTS products_last_checked_idx
+                ON products(last_checked_at)
             """)
 
             cur.execute("""
-                CREATE UNIQUE INDEX IF NOT EXISTS watched_products_scope_product_id_idx
-                ON watched_products ((COALESCE(user_id, 0)), product_id)
+                CREATE INDEX IF NOT EXISTS watchlists_scope_idx
+                ON user_watchlists ((COALESCE(user_id, 0)), active, created_at DESC)
             """)
 
             cur.execute("""
-                CREATE INDEX IF NOT EXISTS price_history_scope_product_id_idx
-                ON price_history ((COALESCE(user_id, 0)), product_id, recorded_at)
+                CREATE UNIQUE INDEX IF NOT EXISTS user_watchlists_scope_product_idx
+                ON user_watchlists ((COALESCE(user_id, 0)), product_id)
+            """)
+
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS watchlists_product_idx
+                ON user_watchlists(product_id, active)
+            """)
+
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS product_price_history_product_idx
+                ON product_price_history(product_id, recorded_at DESC)
+            """)
+
+            cur.execute("""
+                ALTER TABLE products
+                ADD COLUMN IF NOT EXISTS original_price DOUBLE PRECISION
+            """)
+
+            cur.execute("SELECT to_regclass('public.watched_products_legacy') AS legacy_table")
+            watched_products_legacy = cur.fetchone()["legacy_table"]
+
+            if watched_products_legacy:
+                cur.execute("""
+                    ALTER TABLE watched_products_legacy
+                    ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id) ON DELETE CASCADE
+                """)
+
+                cur.execute("""
+                    INSERT INTO products (
+                        external_product_id,
+                        product_url,
+                        name,
+                        brand,
+                        current_price,
+                        original_price,
+                        was_price,
+                        cup_price,
+                        in_stock,
+                        image_url,
+                        last_checked_at,
+                        created_at,
+                        updated_at
+                    )
+                    SELECT
+                        wp.product_id,
+                        wp.product_url,
+                        wp.name,
+                        wp.brand,
+                        wp.current_price,
+                        COALESCE(wp.was_price, wp.current_price),
+                        wp.was_price,
+                        wp.cup_price,
+                        wp.in_stock,
+                        wp.image_url,
+                        wp.last_checked_at,
+                        wp.created_at,
+                        COALESCE(wp.last_checked_at, wp.created_at)
+                    FROM watched_products_legacy wp
+                    ON CONFLICT (external_product_id) DO NOTHING
+                """)
+
+                cur.execute("""
+                    INSERT INTO user_watchlists (
+                        user_id,
+                        product_id,
+                        created_at,
+                        last_seen_price
+                    )
+                    SELECT
+                        wp.user_id,
+                        p.id,
+                        wp.created_at,
+                        wp.current_price
+                    FROM watched_products_legacy wp
+                    JOIN products p ON p.external_product_id = wp.product_id
+                    WHERE NOT EXISTS (
+                        SELECT 1
+                        FROM user_watchlists existing
+                        WHERE existing.user_id IS NOT DISTINCT FROM wp.user_id
+                          AND existing.product_id = p.id
+                    )
+                """)
+
+            cur.execute("SELECT to_regclass('public.price_history_legacy') AS legacy_table")
+            price_history_legacy = cur.fetchone()["legacy_table"]
+
+            if price_history_legacy:
+                cur.execute("""
+                    ALTER TABLE price_history_legacy
+                    ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id) ON DELETE CASCADE
+                """)
+
+                cur.execute("""
+                    INSERT INTO product_price_history (
+                        product_id,
+                        price,
+                        was_price,
+                        in_stock,
+                        recorded_at
+                    )
+                    SELECT DISTINCT
+                        p.id,
+                        ph.price,
+                        prod.was_price,
+                        prod.in_stock,
+                        ph.recorded_at
+                    FROM price_history_legacy ph
+                    JOIN products p ON p.external_product_id = ph.product_id
+                    LEFT JOIN watched_products_legacy prod
+                        ON prod.product_id = ph.product_id
+                    WHERE NOT EXISTS (
+                        SELECT 1
+                        FROM product_price_history existing
+                        WHERE existing.product_id = p.id
+                          AND existing.recorded_at = ph.recorded_at
+                          AND existing.price IS NOT DISTINCT FROM ph.price
+                    )
+                """)
+
+            cur.execute("""
+                UPDATE products
+                SET original_price = was_price
+                WHERE original_price IS DISTINCT FROM was_price
+            """)
+
+            cur.execute("DROP VIEW IF EXISTS watched_products")
+            cur.execute("""
+                CREATE VIEW watched_products AS
+                SELECT
+                    p.id,
+                    p.external_product_id AS product_id,
+                    p.product_url,
+                    p.name,
+                    p.brand,
+                    p.current_price,
+                    p.original_price,
+                    prev.price AS previous_price,
+                    p.was_price,
+                    p.cup_price,
+                    p.in_stock,
+                    p.image_url,
+                    p.last_checked_at,
+                    CASE
+                        WHEN prev.price IS NOT NULL
+                             AND p.current_price IS NOT NULL
+                             AND p.current_price < prev.price
+                        THEN TRUE ELSE FALSE
+                    END AS has_drop,
+                    p.created_at,
+                    NULL::INTEGER AS user_id
+                FROM products p
+                LEFT JOIN LATERAL (
+                    SELECT ph.price
+                    FROM product_price_history ph
+                    WHERE ph.product_id = p.id
+                    ORDER BY ph.recorded_at DESC, ph.id DESC
+                    OFFSET 1 LIMIT 1
+                ) prev ON TRUE
+            """)
+
+            cur.execute("DROP VIEW IF EXISTS price_history")
+            cur.execute("""
+                CREATE VIEW price_history AS
+                SELECT
+                    ph.id,
+                    NULL::INTEGER AS user_id,
+                    p.external_product_id AS product_id,
+                    ph.price,
+                    ph.recorded_at
+                FROM product_price_history ph
+                JOIN products p ON p.id = ph.product_id
             """)
         conn.commit()
 
@@ -324,143 +519,199 @@ def revoke_session(raw_token):
         conn.commit()
 
 
-def save_product(snapshot, *, user_id=None, record_history_always=False):
+def upsert_product_snapshot(snapshot):
     now = utc_now()
 
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT id, current_price
-                FROM watched_products
-                WHERE product_id = %s
-                  AND user_id IS NOT DISTINCT FROM %s
+                SELECT id, current_price, original_price
+                FROM products
+                WHERE external_product_id = %s
                 """,
-                (snapshot.product_id, user_id),
+                (snapshot.product_id,),
             )
             existing = cur.fetchone()
 
             if existing:
                 old_price = existing["current_price"]
-                has_drop = (
-                    old_price is not None
-                    and snapshot.price is not None
-                    and snapshot.price < old_price
-                )
-
                 cur.execute(
                     """
-                    UPDATE watched_products
+                    UPDATE products
                     SET
-                        user_id = %s,
                         product_url = %s,
                         name = %s,
                         brand = %s,
-                        previous_price = %s,
                         current_price = %s,
+                        original_price = %s,
                         was_price = %s,
                         cup_price = %s,
                         in_stock = %s,
                         image_url = %s,
                         last_checked_at = %s,
-                        has_drop = CASE WHEN %s THEN TRUE ELSE has_drop END
-                    WHERE product_id = %s
-                      AND user_id IS NOT DISTINCT FROM %s
+                        updated_at = %s
+                    WHERE id = %s
+                    RETURNING id, external_product_id, current_price, original_price, was_price, cup_price,
+                              in_stock, image_url, product_url, name, brand, last_checked_at,
+                              created_at, updated_at
                     """,
                     (
-                        user_id,
                         snapshot.canonical_url,
                         snapshot.name,
                         snapshot.brand,
-                        old_price,
                         snapshot.price,
+                        snapshot.was_price,
                         snapshot.was_price,
                         snapshot.cup_price,
                         snapshot.in_stock,
                         snapshot.image_url,
                         now,
-                        has_drop,
-                        snapshot.product_id,
-                        user_id,
+                        now,
+                        existing["id"],
                     ),
                 )
+                product = cur.fetchone()
             else:
+                old_price = None
                 cur.execute(
                     """
-                    INSERT INTO watched_products (
-                        user_id,
-                        product_id,
+                    INSERT INTO products (
+                        external_product_id,
                         product_url,
                         name,
                         brand,
                         current_price,
-                        previous_price,
+                        original_price,
                         was_price,
                         cup_price,
                         in_stock,
                         image_url,
                         last_checked_at,
-                        has_drop,
-                        created_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, FALSE, %s)
+                        created_at,
+                        updated_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id, external_product_id, current_price, original_price, was_price, cup_price,
+                              in_stock, image_url, product_url, name, brand, last_checked_at,
+                              created_at, updated_at
                     """,
                     (
-                        user_id,
                         snapshot.product_id,
                         snapshot.canonical_url,
                         snapshot.name,
                         snapshot.brand,
                         snapshot.price,
-                        None,
+                        snapshot.was_price,
                         snapshot.was_price,
                         snapshot.cup_price,
                         snapshot.in_stock,
                         snapshot.image_url,
                         now,
                         now,
+                        now,
                     ),
                 )
+                product = cur.fetchone()
 
             cur.execute(
                 """
                 SELECT price
-                FROM price_history
+                FROM product_price_history
                 WHERE product_id = %s
-                  AND user_id IS NOT DISTINCT FROM %s
                 ORDER BY recorded_at DESC, id DESC
                 LIMIT 1
                 """,
-                (snapshot.product_id, user_id),
+                (product["id"],),
             )
             latest_history = cur.fetchone()
 
-            # Manual saves should still leave an audit trail, but background
-            # refreshes only add history when the price actually changes.
-            if (
-                record_history_always
-                or latest_history is None
-                or latest_history["price"] != snapshot.price
-            ):
+            if latest_history is None or latest_history["price"] != snapshot.price:
                 cur.execute(
                     """
-                    INSERT INTO price_history (user_id, product_id, price, recorded_at)
-                    VALUES (%s, %s, %s, %s)
+                    INSERT INTO product_price_history (product_id, price, was_price, in_stock, recorded_at)
+                    VALUES (%s, %s, %s, %s, %s)
                     """,
-                    (user_id, snapshot.product_id, snapshot.price, now),
+                    (product["id"], snapshot.price, snapshot.was_price, snapshot.in_stock, now),
                 )
 
         conn.commit()
+
+    return product, old_price
+
+
+def add_product_to_watchlist(snapshot, *, user_id=None):
+    product, _ = upsert_product_snapshot(snapshot)
+    now = utc_now()
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO user_watchlists (
+                    user_id,
+                    product_id,
+                    created_at,
+                    last_seen_price
+                ) VALUES (%s, %s, %s, %s)
+                ON CONFLICT ((COALESCE(user_id, 0)), product_id)
+                DO UPDATE SET active = TRUE
+                RETURNING id
+                """,
+                (user_id, product["id"], now, product["current_price"]),
+            )
+            cur.fetchone()
+        conn.commit()
+
+    return product
 
 
 def list_products(*, user_id=None):
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("""
-                SELECT *
-                FROM watched_products
-                WHERE user_id IS NOT DISTINCT FROM %s
-                ORDER BY has_drop DESC, created_at DESC
-            """, (user_id,))
+            cur.execute(
+                """
+                SELECT
+                    uw.id AS watchlist_id,
+                    uw.user_id,
+                    uw.created_at,
+                    uw.last_seen_price,
+                    p.id AS product_db_id,
+                    p.external_product_id AS product_id,
+                    p.product_url,
+                    p.name,
+                    p.brand,
+                    p.current_price,
+                    p.original_price,
+                    prev.price AS previous_price,
+                    p.was_price,
+                    p.cup_price,
+                    p.in_stock,
+                    p.image_url,
+                    p.last_checked_at,
+                    CASE
+                        WHEN prev.price IS NOT NULL AND p.current_price IS NOT NULL AND p.current_price < prev.price
+                        THEN TRUE ELSE FALSE
+                    END AS has_drop
+                FROM user_watchlists uw
+                JOIN products p ON p.id = uw.product_id
+                LEFT JOIN LATERAL (
+                    SELECT ph.price
+                    FROM product_price_history ph
+                    WHERE ph.product_id = p.id
+                    ORDER BY ph.recorded_at DESC, ph.id DESC
+                    OFFSET 1 LIMIT 1
+                ) prev ON TRUE
+                WHERE uw.user_id IS NOT DISTINCT FROM %s
+                  AND uw.active = TRUE
+                ORDER BY
+                    CASE
+                        WHEN prev.price IS NOT NULL AND p.current_price IS NOT NULL AND p.current_price < prev.price
+                        THEN 1 ELSE 0
+                    END DESC,
+                    uw.created_at DESC
+                """,
+                (user_id,),
+            )
             return cur.fetchall()
 
 
@@ -469,17 +720,12 @@ def remove_product(product_id, *, user_id=None):
         with conn.cursor() as cur:
             cur.execute(
                 """
-                DELETE FROM price_history
-                WHERE product_id = %s
-                  AND user_id IS NOT DISTINCT FROM %s
-                """,
-                (product_id, user_id),
-            )
-            cur.execute(
-                """
-                DELETE FROM watched_products
-                WHERE product_id = %s
-                  AND user_id IS NOT DISTINCT FROM %s
+                UPDATE user_watchlists uw
+                SET active = FALSE
+                FROM products p
+                WHERE uw.product_id = p.id
+                  AND p.external_product_id = %s
+                  AND uw.user_id IS NOT DISTINCT FROM %s
                 """,
                 (product_id, user_id),
             )
@@ -491,29 +737,53 @@ def get_price_history(product_id, *, user_id=None):
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT price, recorded_at
-                FROM price_history
-                WHERE product_id = %s
-                  AND user_id IS NOT DISTINCT FROM %s
-                ORDER BY recorded_at ASC
+                SELECT ph.price, ph.recorded_at
+                FROM products p
+                JOIN user_watchlists uw ON uw.product_id = p.id
+                JOIN product_price_history ph ON ph.product_id = p.id
+                WHERE p.external_product_id = %s
+                  AND uw.user_id IS NOT DISTINCT FROM %s
+                  AND uw.active = TRUE
+                ORDER BY ph.recorded_at ASC, ph.id ASC
                 """,
                 (product_id, user_id),
             )
             return cur.fetchall()
 
 
-def refresh_all_products(*, user_id=None):
-    products = list_products(user_id=user_id)
+def refresh_all_products(*, user_id=None, all_scopes=False):
+    if all_scopes:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT DISTINCT
+                        p.external_product_id AS product_id,
+                        p.product_url,
+                        p.name,
+                        p.current_price
+                    FROM user_watchlists uw
+                    JOIN products p ON p.id = uw.product_id
+                    WHERE uw.active = TRUE
+                    """
+                )
+                products = cur.fetchall()
+    else:
+        products = list_products(user_id=user_id)
     drops = []
     increases = []
     errors = []
     updated = []
 
+    seen = set()
     for p in products:
+        if p["product_id"] in seen:
+            continue
+        seen.add(p["product_id"])
         try:
             snapshot = fetch_product_snapshot(p["product_url"])
             old_price = p["current_price"]
-            save_product(snapshot, user_id=user_id)
+            upsert_product_snapshot(snapshot)
 
             has_drop = (
                 old_price is not None
@@ -555,19 +825,28 @@ def refresh_all_products(*, user_id=None):
 
 
 class Handler(BaseHTTPRequestHandler):
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self._send_cors_headers()
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Max-Age", "86400")
+        self.end_headers()
+
     def do_GET(self):
         parsed = urlparse(self.path)
         params = parse_qs(parsed.query)
         current_user = self._get_current_user()
         current_user_id = current_user["id"] if current_user else None
 
-        if parsed.path in ("/", "/dashboard", "/pricecompare.html", "/pricecompare.html"):
-            html = (Path(__file__).parent / "pricecompare.html").read_bytes()
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
-            self.wfile.write(html)
+        if parsed.path in ("/", "/dashboard", "/pricecompare.html"):
+            self._send(
+                200,
+                {
+                    "message": "PriceWatch backend API is running.",
+                    "frontend": "Use the Next.js app at http://127.0.0.1:3000",
+                },
+            )
             return
 
         if parsed.path == "/product":
@@ -589,7 +868,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             try:
                 snapshot = fetch_product_snapshot(target)
-                save_product(snapshot, user_id=current_user_id, record_history_always=True)
+                add_product_to_watchlist(snapshot, user_id=current_user_id)
                 self._send(200, snapshot.to_dict())
             except Exception as exc:
                 self._send(500, {"error": str(exc)})
@@ -746,11 +1025,18 @@ class Handler(BaseHTTPRequestHandler):
             )
         }
 
+    def _send_cors_headers(self):
+        origin = self.headers.get("Origin")
+        if origin in FRONTEND_ORIGINS:
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Access-Control-Allow-Credentials", "true")
+            self.send_header("Vary", "Origin")
+
     def _send(self, status, data, *, headers=None):
         body = json.dumps(data, default=self._json_default).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self._send_cors_headers()
         if headers:
             for key, value in headers.items():
                 self.send_header(key, value)
