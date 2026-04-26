@@ -498,14 +498,14 @@ export default function HomePage() {
           <section className={`page ${currentPage === "check" ? "active" : ""}`}>
             <div className="page-eyebrow">Groceries</div>
             <h1 className="page-title">Price Check</h1>
-            <p className="page-sub">{appMode === "account" ? "Paste a product URL to preview it and save it to your personal dashboard." : "Paste a product URL from Woolworths, Coles, IGA, or ALDI to preview it and save it to your watchlist."}</p>
+            <p className="page-sub">{appMode === "account" ? "Paste a public product URL to preview it and save it to your personal dashboard." : "Paste a public product URL to preview it and save it to your watchlist. Known stores are optimized, and other public product pages now use a best-effort generic scraper."}</p>
             <Flash flash={flashes.check} />
             <div className="check-grid">
               <div>
                 <div className="input-card">
                   <div className="input-label">Product URL or ID</div>
                   <div className="url-row">
-                    <input className="url-input" type="text" value={urlInput} onChange={(event) => setUrlInput(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); doCheck(); } }} placeholder="Paste a product URL from Woolworths, Coles, IGA, or ALDI" />
+                    <input className="url-input" type="text" value={urlInput} onChange={(event) => setUrlInput(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); doCheck(); } }} placeholder="Paste a public product URL" />
                     <button className="btn-primary" type="button" onClick={doCheck} disabled={checkLoading}>{checkLoading ? <span className="spin" /> : "Check"}</button>
                   </div>
                   <div className={`load-bar ${checkLoading ? "on" : ""}`}><div className="load-bar-inner" /></div>

@@ -142,14 +142,16 @@ def init_db():
                 BEGIN
                     IF EXISTS (
                         SELECT 1
-                        FROM information_schema.tables
-                        WHERE table_schema = 'public'
-                          AND table_name = 'watched_products'
+                                                FROM information_schema.tables
+                                                WHERE table_schema = 'public'
+                                                    AND table_name = 'watched_products'
+                                                    AND table_type = 'BASE TABLE'
                     ) AND NOT EXISTS (
                         SELECT 1
-                        FROM information_schema.tables
-                        WHERE table_schema = 'public'
-                          AND table_name = 'watched_products_legacy'
+                                                FROM pg_class c
+                                                JOIN pg_namespace n ON n.oid = c.relnamespace
+                                                WHERE n.nspname = 'public'
+                                                    AND c.relname = 'watched_products_legacy'
                     ) THEN
                         ALTER TABLE watched_products RENAME TO watched_products_legacy;
                     END IF;
@@ -162,14 +164,16 @@ def init_db():
                 BEGIN
                     IF EXISTS (
                         SELECT 1
-                        FROM information_schema.tables
-                        WHERE table_schema = 'public'
-                          AND table_name = 'price_history'
+                                                FROM information_schema.tables
+                                                WHERE table_schema = 'public'
+                                                    AND table_name = 'price_history'
+                                                    AND table_type = 'BASE TABLE'
                     ) AND NOT EXISTS (
                         SELECT 1
-                        FROM information_schema.tables
-                        WHERE table_schema = 'public'
-                          AND table_name = 'price_history_legacy'
+                                                FROM pg_class c
+                                                JOIN pg_namespace n ON n.oid = c.relnamespace
+                                                WHERE n.nspname = 'public'
+                                                    AND c.relname = 'price_history_legacy'
                     ) THEN
                         ALTER TABLE price_history RENAME TO price_history_legacy;
                     END IF;
@@ -207,7 +211,16 @@ def init_db():
                 ADD COLUMN IF NOT EXISTS original_price DOUBLE PRECISION
             """)
 
-            cur.execute("SELECT to_regclass('public.watched_products_legacy') AS legacy_table")
+            cur.execute("""
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_class c
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE n.nspname = 'public'
+                      AND c.relname = 'watched_products_legacy'
+                      AND c.relkind = 'r'
+                ) AS legacy_table
+            """)
             watched_products_legacy = cur.fetchone()["legacy_table"]
 
             if watched_products_legacy:
@@ -272,7 +285,16 @@ def init_db():
                     )
                 """)
 
-            cur.execute("SELECT to_regclass('public.price_history_legacy') AS legacy_table")
+            cur.execute("""
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_class c
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE n.nspname = 'public'
+                      AND c.relname = 'price_history_legacy'
+                      AND c.relkind = 'r'
+                ) AS legacy_table
+            """)
             price_history_legacy = cur.fetchone()["legacy_table"]
 
             if price_history_legacy:

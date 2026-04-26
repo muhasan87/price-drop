@@ -2,6 +2,8 @@
 
 Local prototype for tracking grocery product prices from direct product URLs.
 
+The scraper layer includes a dedicated Woolworths parser plus a generic pipeline for other public product pages. The generic path now combines structured-data extraction, embedded app-state parsing, DOM fallback, and an optional Playwright browser pass with captured network JSON payloads.
+
 ## Setup
 
 Create and activate a virtual environment, then install the project dependencies:
@@ -12,6 +14,12 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+The generic browser fallback uses Playwright. If Chromium is not already installed in your environment, run:
+
+```bash
+python -m playwright install chromium
+```
+
 Copy the sample environment file and fill in your PostgreSQL details:
 
 ```bash
@@ -20,7 +28,7 @@ cp .env.example .env
 
 ## Current flow
 
-1. User pastes a product URL into the app
+1. User pastes a public product URL into the app
 2. The user presses `Check Price`
 3. The app previews the product on the current page
 4. The preview shows the product name, current price, and whether it is on sale
@@ -103,7 +111,7 @@ The automated checker updates `last_checked_at` every run, but it only adds a ne
 - `server.py`: local web server and PostgreSQL-backed watchlist API
 - `run_checks.py`: background checker for scheduled automated scrapes
 - `woolworths_scraper.py`: reusable Woolworths scraping helpers
-- `store_scrapers.py`: routes supported retailer URLs to the right scraper
+- `store_scrapers.py`: routes known retailers to optimized scrapers and applies a generic extractor to other public product pages
 
 ## Good next steps
 

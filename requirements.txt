@@ -1,2 +1,4 @@
 psycopg==3.3.3
 psycopg-binary==3.3.3
+beautifulsoup4==4.14.3
+playwright==1.58.0

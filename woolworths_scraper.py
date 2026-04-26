@@ -39,6 +39,13 @@ class ProductSnapshot:
     availability: str | None
     image_url: str | None
     canonical_url: str
+    currency: str | None = None
+    seller: str | None = None
+    variant: str | None = None
+    page_type: str | None = None
+    fetch_mode: str | None = None
+    extraction_source: str | None = None
+    extraction_confidence: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -218,6 +225,12 @@ def build_snapshot(
         availability=availability,
         image_url=image_url,
         canonical_url=canonical_url,
+        currency="AUD",
+        seller="Woolworths",
+        page_type="product",
+        fetch_mode="http",
+        extraction_source="http:woolworths-next-data",
+        extraction_confidence=0.99,
     )
 
 
